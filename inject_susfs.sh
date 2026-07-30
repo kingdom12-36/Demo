@@ -85,70 +85,61 @@ fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
-    step "3/8 — Manual hook: sys_reboot → kernel/reboot.c"
-    # ─────────────────────────────────────────────────────────────────────────────
-    # ksu_handle_sys_reboot is the supercall gateway used by ksud + SusFS.
-    # Required for v3.1.0-legacy-susfs Manual Hooks (KPROBES disabled).
-    # NOTE: the call must go AFTER this function's local declarations
-    # (pid_ns/buffer/ret) and BEFORE its first statement. Inserting it right
-    # after the opening brace (as an earlier version of this step did) breaks
-    # C's declaration-before-statement ordering and fails the build under
-    # -Werror=declaration-after-statement.
-    REBOOT_C="$KERNEL_DIR/kernel/reboot.c"
-    if [ ! -f "$REBOOT_C" ]; then
-      warn "kernel/reboot.c not found — skipping sys_reboot hook"
-    elif grep -q 'ksu_handle_sys_reboot' "$REBOOT_C"; then
-      ok "kernel/reboot.c already has ksu_handle_sys_reboot — skipping"
-    else
-      python3 - "$REBOOT_C" << 'PYEOF'
-    import sys, re
+step "3/8 — Manual hook: sys_reboot → kernel/reboot.c"
+# ─────────────────────────────────────────────────────────────────────────────
+# ksu_handle_sys_reboot is the supercall gateway used by ksud + SusFS.
+# Required for v3.1.0-legacy-susfs Manual Hooks (KPROBES disabled).
+# NOTE: the call must go AFTER this function's local declarations
+# (pid_ns/buffer/ret) and BEFORE its first statement. Inserting it right
+# after the opening brace (as an earlier version of this step did) breaks
+# C's declaration-before-statement ordering and fails the build under
+# -Werror=declaration-after-statement.
+REBOOT_C="$KERNEL_DIR/kernel/reboot.c"
+if [ ! -f "$REBOOT_C" ]; then
+    warn "kernel/reboot.c not found — skipping sys_reboot hook"
+elif grep -q 'ksu_handle_sys_reboot' "$REBOOT_C"; then
+    ok "kernel/reboot.c already has ksu_handle_sys_reboot — skipping"
+else
+    python3 - "$REBOOT_C" << 'PYEOF'
+import sys, re
 
-    path = sys.argv[1]
-    src = open(path).read()
+path = sys.argv[1]
+src = open(path).read()
 
-    extern_block = (
-      "#ifdef CONFIG_KSU\n"
-      "extern int ksu_handle_sys_reboot(int magic1, int magic2,"
-      " unsigned int cmd, void __user **arg);\n"
-      "#endif\n\n"
-    )
-    call_block = (
-      "#ifdef CONFIG_KSU\n"
-      "\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n"
-      "#endif\n"
-    )
+extern_block = (
+    "#ifdef CONFIG_KSU\n"
+    "extern int ksu_handle_sys_reboot(int magic1, int magic2,"
+    " unsigned int cmd, void __user **arg);\n"
+    "#endif\n\n"
+)
+call_block = (
+    "#ifdef CONFIG_KSU\n"
+    "\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n"
+    "#endif\n"
+)
 
-    # 1) extern declaration at file scope, right before the function -- matches
-    #    this kernel's existing style (fs/exec.c, fs/open.c, fs/stat.c all
-    #    declare their ksu_handle_* extern immediately above the hooked fn).
-    func_pat = re.compile(r'SYSCALL_DEFINE4\s*\(\s*reboot\b')
-    m_func = func_pat.search(src)
-    if not m_func:
-      print("ERROR: SYSCALL_DEFINE4(reboot) not found in " + path)
-      sys.exit(1)
-    src = src[:m_func.start()] + extern_block + src[m_func.start():]
+func_pat = re.compile(r'SYSCALL_DEFINE4\s*\(\s*reboot\b')
+m_func = func_pat.search(src)
+if not m_func:
+    print("ERROR: SYSCALL_DEFINE4(reboot) not found in " + path)
+    sys.exit(1)
+src = src[:m_func.start()] + extern_block + src[m_func.start():]
 
-    # 2) hook call goes AFTER the function's local declarations and BEFORE its
-    #    first statement. Anchor on the "We only trust the superuser" comment,
-    #    which sits immediately after those declarations on this kernel --
-    #    inserting before it guarantees correct C declaration ordering.
-    anchor_pat = re.compile(r'\n(\t/\* We only trust the superuser)')
-    m_anchor = anchor_pat.search(src)
-    if not m_anchor:
-      print("ERROR: anchor comment not found after " + path +
-            " declarations -- refusing to guess placement (would risk a" +
-            " declaration-after-statement build failure)")
-      sys.exit(1)
-    insert_pos = m_anchor.start()
-    src = src[:insert_pos] + '\n' + call_block + src[insert_pos:]
+anchor_pat = re.compile(r'\n(\t/\* We only trust the superuser)')
+m_anchor = anchor_pat.search(src)
+if not m_anchor:
+    print("ERROR: anchor comment not found -- refusing to guess placement")
+    sys.exit(1)
+insert_pos = m_anchor.start()
+src = src[:insert_pos] + '\n' + call_block + src[insert_pos:]
 
-    open(path, 'w').write(src)
-    print("OK: ksu_handle_sys_reboot extern + call inserted at correct positions")
-    PYEOF
-      ok "sys_reboot hook injected into kernel/reboot.c"
-    fi
+open(path, 'w').write(src)
+print("OK: ksu_handle_sys_reboot extern + call inserted at correct positions")
+PYEOF
+    ok "sys_reboot hook injected into kernel/reboot.c"
+fi
 
-    step "4/8 — Copy new kernel files (susfs.c, sus_su.c, susfs.h, susfs_def.h, sus_su.h)"
+step "4/8 — Copy new kernel files (susfs.c, sus_su.c, susfs.h, susfs_def.h, sus_su.h)"
 # ─────────────────────────────────────────────────────────────────────────────
 
 copy_file() {
