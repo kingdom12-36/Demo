@@ -358,30 +358,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── 16. Telegram notification (optional) ─────────────────────────────────
-      - name: Notify Telegram on success
-        if: ${{ success() && secrets.TELEGRAM_BOT_TOKEN != '' }}
-        run: |
-          curl -s -X POST \
-            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d parse_mode="Markdown" \
-            -d text="✅ *Kernel build succeeded*
-          Kernel: \`${{ env.KERNEL_VERSION }}\`
-          KSU-Next: \`${{ github.event.inputs.kernelsu_tag }}\`
-          SusFS: \`${{ github.event.inputs.susfs_tag }}\`
-          Hook: Manual
-          Time: ${{ env.BUILD_DATE }}"
-
-      - name: Notify Telegram on failure
-        if: ${{ failure() && secrets.TELEGRAM_BOT_TOKEN != '' }}
-        run: |
-          curl -s -X POST \
-            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d parse_mode="Markdown" \
-            -d text="❌ *Kernel build FAILED*
-          Kernel: \`${{ env.KERNEL_VERSION }}\`
-          KSU-Next: \`${{ github.event.inputs.kernelsu_tag }}\`
-          SusFS: \`${{ github.event.inputs.susfs_tag }}\`
-          Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      
