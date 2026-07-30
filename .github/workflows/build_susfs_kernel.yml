@@ -1,0 +1,387 @@
+name: Build 4.14 Kernel with KernelSU-Next + SusFS
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Workflow: build_susfs_kernel.yml
+#  Purpose : Inject KernelSU-Next (legacy-susfs) + SusFS v2.0.0 into the
+#            Ocin4everKernel (branch: Susfs) and build an arm64 boot image.
+#
+#  How to use
+#  ──────────
+#  1. Copy this file into your kernel repo at .github/workflows/
+#  2. Copy Insert_susfs_into4.14kernel.sh into the root of the same repo.
+#  3. Set the repository secrets listed below (optional but recommended).
+#  4. Trigger manually via Actions → "Build 4.14 Kernel + KSU-Next + SusFS"
+#
+#  Required secrets (set in repo Settings → Secrets → Actions):
+#    TELEGRAM_CHAT_ID   – Telegram chat to send build notifications (optional)
+#    TELEGRAM_BOT_TOKEN – Bot token for notifications               (optional)
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernelsu_tag:
+        description: "KernelSU-Next tag (legacy-susfs branch)"
+        required: false
+        default: "v3.1.0-legacy-susfs"
+        type: string
+      susfs_tag:
+        description: "SusFS tag to backport"
+        required: false
+        default: "v2.0.0"
+        type: string
+      lto:
+        description: "Enable LTO (Link Time Optimisation)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      release:
+        description: "Create a GitHub Release after successful build"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+env:
+  # ── Toolchain ───────────────────────────────────────────────────────────────
+  CLANG_VERSION: "r530567"
+  CLANG_URL: "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86"
+  GCC_AARCH64: "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9"
+  GCC_ARM: "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9"
+
+  # ── Kernel source ───────────────────────────────────────────────────────────
+  KERNEL_REPO: "kingdom12-36/Ocin4everKernel"
+  KERNEL_BRANCH: "Susfs"
+
+  # ── Build config ────────────────────────────────────────────────────────────
+  ARCH: "arm64"
+  DEFCONFIG: "defconfig"          # update if your device uses a different name
+  KSU_CONFIG: "ksu.config"
+  CROSS_COMPILE: "aarch64-linux-android-"
+  CROSS_COMPILE_ARM32: "arm-linux-androideabi-"
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  #  JOB 1 – Inject SusFS then build the kernel
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: "Kernel build (KSU-Next ${{ github.event.inputs.kernelsu_tag }} + SusFS ${{ github.event.inputs.susfs_tag }})"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      # ── 0. Record start time ────────────────────────────────────────────────
+      - name: Record start time
+        id: timer
+        run: echo "start=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      # ── 1. Install build dependencies ───────────────────────────────────────
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            git bc bison flex libssl-dev make libc6-dev-i386 \
+            lib32gcc-s1 lib32z1-dev xz-utils curl wget zip unzip \
+            libxml2-utils python3 python3-pip lz4 zstd \
+            ccache ca-certificates gnupg
+
+      # ── 2. Checkout the kernel source ────────────────────────────────────────
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.KERNEL_REPO }}
+          ref: ${{ env.KERNEL_BRANCH }}
+          path: kernel_source
+          # Use PAT so we can push back to the kernel repo after patching
+          token: ${{ secrets.GITHUB_PERSONAL_ACCESS_TOKEN }}
+          # fetch full history so we can commit back
+          fetch-depth: 0
+
+      # ── 3. Checkout THIS repo (for the insert script) ────────────────────────
+      - name: Checkout script repo
+        uses: actions/checkout@v4
+        with:
+          path: scripts_repo
+          token: ${{ secrets.GITHUB_PERSONAL_ACCESS_TOKEN }}
+
+      # ── 4. Set up ccache ────────────────────────────────────────────────────
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          max-size: "3G"
+          key: kernel-4.14-susfs
+
+      # ── 5. Download Clang toolchain ──────────────────────────────────────────
+      - name: Cache Clang toolchain
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: toolchains/clang
+          key: clang-${{ env.CLANG_VERSION }}
+
+      - name: Download Clang (if not cached)
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchains/clang
+          # Download the prebuilt Clang from Google
+          wget -q "https://github.com/ZyCromerZ/Clang/releases/download/${CLANG_VERSION}-release/Clang-${CLANG_VERSION}-release.tar.gz" \
+               -O clang.tar.gz || \
+          wget -q "https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.tar.gz" \
+               -O clang.tar.gz
+          tar -xf clang.tar.gz -C toolchains/clang --strip-components=1
+          rm -f clang.tar.gz
+
+      # ── 6. Download GCC toolchains ───────────────────────────────────────────
+      - name: Cache GCC toolchains
+        id: cache-gcc
+        uses: actions/cache@v4
+        with:
+          path: toolchains/gcc
+          key: gcc-aarch64-arm-android-4.9
+
+      - name: Download GCC (if not cached)
+        if: steps.cache-gcc.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchains/gcc/aarch64 toolchains/gcc/arm
+          git clone --depth=1 \
+              https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
+              toolchains/gcc/aarch64 &
+          git clone --depth=1 \
+              https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
+              toolchains/gcc/arm &
+          wait
+
+      # ── 7. Inject KernelSU-Next + SusFS ─────────────────────────────────────
+      - name: Inject KernelSU-Next + SusFS into kernel tree
+        run: |
+          chmod +x scripts_repo/Insert_susfs_into4.14kernel.sh
+
+          # Run the insert script — disable the git push step here;
+          # the workflow will push via GITHUB_TOKEN in step 9 if needed.
+          PUSH=0 \
+          KERNELSU_TAG="${{ github.event.inputs.kernelsu_tag }}" \
+          SUSFS_TAG="${{ github.event.inputs.susfs_tag }}" \
+            scripts_repo/Insert_susfs_into4.14kernel.sh \
+              "$(pwd)/kernel_source" \
+              "${{ env.KERNEL_BRANCH }}"
+
+      # ── 8. Set up build environment variables ───────────────────────────────
+      - name: Export build variables
+        run: |
+          CLANG_BIN="$(pwd)/toolchains/clang/bin"
+          GCC64_BIN="$(pwd)/toolchains/gcc/aarch64/bin"
+          GCC32_BIN="$(pwd)/toolchains/gcc/arm/bin"
+          echo "PATH=${CLANG_BIN}:${GCC64_BIN}:${GCC32_BIN}:/usr/lib/ccache:${PATH}" >> "$GITHUB_ENV"
+          echo "CLANG_BIN=$CLANG_BIN"  >> "$GITHUB_ENV"
+
+          # Derive kernel version for artefact naming
+          VER=$(grep -m1 '^VERSION '    kernel_source/Makefile | awk '{print $3}')
+          PAT=$(grep -m1 '^PATCHLEVEL ' kernel_source/Makefile | awk '{print $3}')
+          SUB=$(grep -m1 '^SUBLEVEL '   kernel_source/Makefile | awk '{print $3}')
+          echo "KERNEL_VERSION=${VER}.${PAT}.${SUB}" >> "$GITHUB_ENV"
+          echo "BUILD_DATE=$(date +'%Y%m%d-%H%M')"   >> "$GITHUB_ENV"
+
+      # ── 9. Generate .config from defconfig + ksu.config ─────────────────────
+      - name: Generate kernel .config
+        working-directory: kernel_source
+        run: |
+          MAKE_ARGS=(
+            ARCH=${{ env.ARCH }}
+            CC=clang
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=${{ env.CROSS_COMPILE }}
+            CROSS_COMPILE_ARM32=${{ env.CROSS_COMPILE_ARM32 }}
+            -j$(nproc)
+          )
+
+          # Start from defconfig
+          make "${MAKE_ARGS[@]}" ${{ env.DEFCONFIG }}
+
+          # Merge ksu.config on top (uses scripts/kconfig/merge_config.sh)
+          if [ -f "arch/${{ env.ARCH }}/configs/${{ env.KSU_CONFIG }}" ]; then
+            ./scripts/kconfig/merge_config.sh -m .config \
+              "arch/${{ env.ARCH }}/configs/${{ env.KSU_CONFIG }}"
+            make "${MAKE_ARGS[@]}" olddefconfig
+          fi
+
+          # Verify key config options are set
+          echo "=== Config verification ==="
+          for opt in KSU KSU_SUSFS; do
+            if grep -q "CONFIG_${opt}=y" .config; then
+              echo "  [OK] CONFIG_${opt}=y"
+            else
+              echo "  [WARN] CONFIG_${opt} is NOT set in .config"
+            fi
+          done
+          if grep -q "CONFIG_KPROBES=y" .config; then
+            echo "  [WARN] KPROBES is enabled — Manual Hooks preferred for 4.14"
+          else
+            echo "  [OK] KPROBES disabled — using Manual Hooks"
+          fi
+
+      # ── 10. Build the kernel ─────────────────────────────────────────────────
+      - name: Build kernel
+        working-directory: kernel_source
+        run: |
+          MAKE_ARGS=(
+            ARCH=${{ env.ARCH }}
+            CC="ccache clang"
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=${{ env.CROSS_COMPILE }}
+            CROSS_COMPILE_ARM32=${{ env.CROSS_COMPILE_ARM32 }}
+            -j$(nproc)
+            2>&1
+          )
+
+          # Enable LTO if requested
+          if [ "${{ github.event.inputs.lto }}" = "true" ]; then
+            MAKE_ARGS+=(LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip OBJCOPY=llvm-objcopy)
+          fi
+
+          make "${MAKE_ARGS[@]}" Image.gz-dtb || make "${MAKE_ARGS[@]}" Image.gz || make "${MAKE_ARGS[@]}" Image
+
+      # ── 11. Collect build output ─────────────────────────────────────────────
+      - name: Collect kernel images
+        id: collect
+        run: |
+          mkdir -p out/kernel
+
+          # Copy whichever image was built
+          for img in \
+            kernel_source/arch/${{ env.ARCH }}/boot/Image.gz-dtb \
+            kernel_source/arch/${{ env.ARCH }}/boot/Image.gz \
+            kernel_source/arch/${{ env.ARCH }}/boot/Image; do
+            if [ -f "$img" ]; then
+              cp "$img" out/kernel/
+              echo "image=$(basename "$img")" >> "$GITHUB_OUTPUT"
+              echo "  Collected: $img"
+              break
+            fi
+          done
+
+          # Build metadata file
+          cat > out/kernel/build-info.txt <<EOF
+          Kernel   : ${{ env.KERNEL_REPO }} @ ${{ env.KERNEL_BRANCH }}
+          Version  : ${{ env.KERNEL_VERSION }}
+          KSU-Next : ${{ github.event.inputs.kernelsu_tag }}
+          SusFS    : ${{ github.event.inputs.susfs_tag }}
+          Hooks    : Manual (KPROBES disabled)
+          LTO      : ${{ github.event.inputs.lto }}
+          Built at : ${{ env.BUILD_DATE }}
+          Runner   : ubuntu-22.04 / $(nproc) cores
+          EOF
+          cat out/kernel/build-info.txt
+
+          echo "zip_name=Ocin4everKernel-KSU-SusFS-${{ env.KERNEL_VERSION }}-${{ env.BUILD_DATE }}" >> "$GITHUB_OUTPUT"
+
+      # ── 12. Create flashable zip skeleton (optional) ─────────────────────────
+      - name: Create AnyKernel3 flashable zip
+        run: |
+          # Clone AnyKernel3 as the zip template
+          git clone --depth=1 \
+            https://github.com/osm0sis/AnyKernel3.git \
+            out/anykernel3
+
+          # Copy the built Image into AnyKernel3
+          cp out/kernel/${{ steps.collect.outputs.image }} out/anykernel3/
+
+          # Patch anykernel.sh if it exists (set device fingerprint, etc.)
+          if [ -f out/anykernel3/anykernel.sh ]; then
+            # Remove device check — make it universal
+            sed -i 's/device.name1=.*/device.name1=/' out/anykernel3/anykernel.sh
+            sed -i 's/do.devicecheck=1/do.devicecheck=0/' out/anykernel3/anykernel.sh
+          fi
+
+          # Zip it up
+          cd out/anykernel3
+          zip -r9 \
+            "../${{ steps.collect.outputs.zip_name }}.zip" \
+            . \
+            -x "*.git*" "*.github*" "*.gitignore" "README.md"
+          cd ../..
+          ls -lh out/*.zip || true
+
+      # ── 13. Upload build artefacts ───────────────────────────────────────────
+      - name: Upload kernel image
+        uses: actions/upload-artifact@v4
+        with:
+          name: "${{ steps.collect.outputs.zip_name }}"
+          path: |
+            out/*.zip
+            out/kernel/build-info.txt
+          retention-days: 14
+          if-no-files-found: warn
+
+      # ── 14. Compute elapsed time ─────────────────────────────────────────────
+      - name: Build duration
+        if: always()
+        run: |
+          END=$(date +%s)
+          START=${{ steps.timer.outputs.start }}
+          ELAPSED=$(( END - START ))
+          echo "Build duration: $(( ELAPSED / 60 ))m $(( ELAPSED % 60 ))s"
+
+      # ── 15. Create GitHub Release (optional) ─────────────────────────────────
+      - name: Create GitHub Release
+        if: ${{ github.event.inputs.release == 'true' && success() }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "kernel-${{ env.KERNEL_VERSION }}-susfs-${{ github.event.inputs.susfs_tag }}-${{ env.BUILD_DATE }}"
+          name: "OcinKernel ${{ env.KERNEL_VERSION }} | KSU-Next ${{ github.event.inputs.kernelsu_tag }} | SusFS ${{ github.event.inputs.susfs_tag }}"
+          body: |
+            ## Ocin4everKernel — KernelSU-Next + SusFS Build
+
+            | Item | Value |
+            |------|-------|
+            | Kernel | ${{ env.KERNEL_VERSION }} |
+            | KernelSU-Next | ${{ github.event.inputs.kernelsu_tag }} (legacy-susfs branch) |
+            | SusFS | ${{ github.event.inputs.susfs_tag }} |
+            | Hook method | **Manual Hooks** (KPROBES disabled) |
+            | LTO | ${{ github.event.inputs.lto }} |
+            | Built | ${{ env.BUILD_DATE }} |
+
+            ### Flash instructions
+            1. Flash in TWRP / OrangeFox recovery.
+            2. Wipe dalvik/cache after flashing.
+            3. Install KernelSU-Next manager APK.
+            4. Root status should show immediately.
+
+            > **Note:** SusFS hides root traces. If an app still detects root, add it to the SusList inside KSU manager.
+          files: out/*.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 16. Telegram notification (optional) ─────────────────────────────────
+      - name: Notify Telegram on success
+        if: ${{ success() && secrets.TELEGRAM_BOT_TOKEN != '' }}
+        run: |
+          curl -s -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d parse_mode="Markdown" \
+            -d text="✅ *Kernel build succeeded*
+          Kernel: \`${{ env.KERNEL_VERSION }}\`
+          KSU-Next: \`${{ github.event.inputs.kernelsu_tag }}\`
+          SusFS: \`${{ github.event.inputs.susfs_tag }}\`
+          Hook: Manual
+          Time: ${{ env.BUILD_DATE }}"
+
+      - name: Notify Telegram on failure
+        if: ${{ failure() && secrets.TELEGRAM_BOT_TOKEN != '' }}
+        run: |
+          curl -s -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d parse_mode="Markdown" \
+            -d text="❌ *Kernel build FAILED*
+          Kernel: \`${{ env.KERNEL_VERSION }}\`
+          KSU-Next: \`${{ github.event.inputs.kernelsu_tag }}\`
+          SusFS: \`${{ github.event.inputs.susfs_tag }}\`
+          Check: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
