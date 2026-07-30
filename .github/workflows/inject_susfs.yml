@@ -1,0 +1,288 @@
+name: Inject SusFS into Ocin4everKernel
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  يحقن KernelSU-Next (v3.1.0-legacy-susfs) + SusFS (kernel-4.14)
+#  في ريبو الكيرنل مباشرةً بدون بناء — كل شي بكوميت واحدة.
+#
+#  الريبو المستهدف : kingdom12-36/Ocin4everKernel   (branch: Susfs)
+#  SusFS المصدر   : gitlab.com/simonpunk/susfs4ksu  (branch: kernel-4.14)
+#  KSU-Next       : github.com/KernelSU-Next/KernelSU-Next  (tag: v3.1.0-legacy-susfs)
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_tag:
+        description: "KernelSU-Next tag"
+        default: "v3.1.0-legacy-susfs"
+        required: false
+      susfs_branch:
+        description: "SusFS GitLab branch"
+        default: "kernel-4.14"
+        required: false
+      dry_run:
+        description: "Dry run — show what would change, don't push"
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+jobs:
+  inject:
+    name: "Inject SusFS → Ocin4everKernel/Susfs"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    env:
+      KERNEL_REPO: "kingdom12-36/Ocin4everKernel"
+      KERNEL_BRANCH: "Susfs"
+      KSU_REPO: "https://github.com/KernelSU-Next/KernelSU-Next.git"
+      SUSFS_REPO: "https://gitlab.com/simonpunk/susfs4ksu.git"
+
+    steps:
+      # ── 1. Clone الكيرنل بالكامل مع الـ submodules ──────────────────────────
+      - name: Clone kernel repo
+        run: |
+          git config --global user.name  "SusFS Bot"
+          git config --global user.email "susfs-bot@noreply"
+          git clone \
+            --recurse-submodules \
+            --branch "${{ env.KERNEL_BRANCH }}" \
+            "https://${{ secrets.GH_PAT }}@github.com/${{ env.KERNEL_REPO }}.git" \
+            kernel
+          cd kernel
+          echo "=== Current KernelSU-Next submodule SHA ==="
+          git submodule status
+
+      # ── 2. Clone SusFS من GitLab ──────────────────────────────────────────────
+      - name: Clone SusFS (kernel-4.14)
+        run: |
+          git clone \
+            --depth=1 \
+            --branch "${{ github.event.inputs.susfs_branch }}" \
+            "${{ env.SUSFS_REPO }}" \
+            susfs4ksu
+
+          echo "=== SusFS repo contents ==="
+          ls susfs4ksu/
+          echo ""
+          echo "=== kernel_patches/ ==="
+          ls susfs4ksu/kernel_patches/ 2>/dev/null || echo "(no kernel_patches dir)"
+          echo ""
+          echo "=== fs/ files ==="
+          ls susfs4ksu/fs/ 2>/dev/null || echo "(no fs dir)"
+
+      # ── 3. تحديث submodule KernelSU-Next إلى tag legacy-susfs ──────────────
+      - name: Update KernelSU-Next submodule to ${{ github.event.inputs.ksu_tag }}
+        run: |
+          cd kernel/KernelSU-Next
+          git fetch --tags origin
+          git checkout "${{ github.event.inputs.ksu_tag }}"
+          echo "=== KSU-Next now at ==="
+          git log --oneline -3
+          cd ../..
+          echo "=== KSU kernel/ files after update ==="
+          ls kernel/KernelSU-Next/kernel/
+
+      # ── 4. نسخ ملفات SusFS إلى شجرة الكيرنل ──────────────────────────────
+      - name: Copy SusFS kernel files
+        run: |
+          cd kernel
+
+          # ─ susfs.c ─
+          SUSFS_C=""
+          for candidate in \
+            "../susfs4ksu/fs/susfs.c" \
+            "../susfs4ksu/kernel_patches/fs/susfs.c"; do
+            if [ -f "$candidate" ]; then
+              SUSFS_C="$candidate"; break
+            fi
+          done
+
+          if [ -n "$SUSFS_C" ]; then
+            cp "$SUSFS_C" fs/susfs.c
+            echo "[+] Copied susfs.c → fs/susfs.c"
+          else
+            echo "[!] susfs.c not found — will try patch only"
+          fi
+
+          # ─ susfs.h ─
+          SUSFS_H=""
+          for candidate in \
+            "../susfs4ksu/include/linux/susfs.h" \
+            "../susfs4ksu/kernel_patches/include/linux/susfs.h"; do
+            if [ -f "$candidate" ]; then
+              SUSFS_H="$candidate"; break
+            fi
+          done
+
+          if [ -n "$SUSFS_H" ]; then
+            mkdir -p include/linux
+            cp "$SUSFS_H" include/linux/susfs.h
+            echo "[+] Copied susfs.h → include/linux/susfs.h"
+          else
+            echo "[!] susfs.h not found — will try patch only"
+          fi
+
+      # ── 5. تطبيق patches ──────────────────────────────────────────────────
+      - name: Apply SusFS kernel patch (50_add_susfs*)
+        run: |
+          cd kernel
+          # Patch لشجرة الكيرنل (fs/, include/)
+          KERNEL_PATCH=$(find ../susfs4ksu/kernel_patches -maxdepth 1 \
+            -name "50_add_susfs_in_kernel-4.14*" -o \
+            -name "50_add_susfs_in_kernel-4.x*"  -o \
+            -name "50_add_susfs*4.14*" 2>/dev/null | head -1)
+
+          if [ -n "$KERNEL_PATCH" ]; then
+            echo "[+] Applying kernel patch: $KERNEL_PATCH"
+            patch -p1 --forward --fuzz=3 < "$KERNEL_PATCH" && \
+              echo "[+] Patch applied cleanly" || \
+              echo "[!] Patch had rejects — check .rej files"
+          else
+            echo "[!] No 4.14 kernel patch found — files copied directly"
+          fi
+
+          # Patch الجانب KSU داخل KernelSU-Next/kernel/
+          KSU_PATCH=$(find ../susfs4ksu/kernel_patches -maxdepth 3 \
+            \( -name "*ksu-next*" -o -name "*implement-susfs*" \) \
+            -name "*.patch" 2>/dev/null | head -1)
+
+          if [ -n "$KSU_PATCH" ]; then
+            echo "[+] Applying KSU-side patch: $KSU_PATCH"
+            patch -p1 --forward --fuzz=3 \
+              --directory=KernelSU-Next/kernel < "$KSU_PATCH" && \
+              echo "[+] KSU patch applied cleanly" || \
+              echo "[!] KSU patch had rejects"
+          else
+            echo "[~] No KSU-side patch needed (v3.1.0-legacy-susfs includes it)"
+          fi
+
+      # ── 6. تحديث fs/Makefile و fs/Kconfig ──────────────────────────────────
+      - name: Wire SusFS into fs/Makefile and fs/Kconfig
+        run: |
+          cd kernel
+
+          # fs/Makefile
+          if ! grep -q 'susfs.o' fs/Makefile; then
+            printf '\n# SusFS\nobj-$(CONFIG_KSU_SUSFS) += susfs.o\n' >> fs/Makefile
+            echo "[+] Added susfs.o to fs/Makefile"
+          else
+            echo "[=] fs/Makefile already has susfs.o"
+          fi
+
+          # fs/Kconfig — قبل سطر endmenu الأخير
+          if ! grep -q 'KSU_SUSFS' fs/Kconfig; then
+            sed -i '/^endmenu/i\
+\
+config KSU_SUSFS\
+\tbool "Enable SusFS for KernelSU"\
+\tdepends on KSU\
+\tdefault y if KSU\
+\thelp\
+\t  Hides KernelSU traces from apps using SusFS filesystem hooks.\
+' fs/Kconfig
+            echo "[+] Added KSU_SUSFS to fs/Kconfig"
+          else
+            echo "[=] fs/Kconfig already has KSU_SUSFS"
+          fi
+
+      # ── 7. تحديث ksu.config ──────────────────────────────────────────────────
+      - name: Update arch/arm64/configs/ksu.config
+        run: |
+          CFG="kernel/arch/arm64/configs/ksu.config"
+
+          enable_opt() {
+            local opt="$1"
+            sed -i "/^# CONFIG_${opt} is not set/d" "$CFG"
+            sed -i "/^CONFIG_${opt}=/d"             "$CFG"
+            echo "CONFIG_${opt}=y" >> "$CFG"
+            echo "[+] $opt=y"
+          }
+
+          disable_opt() {
+            local opt="$1"
+            sed -i "/^CONFIG_${opt}=.*/d"              "$CFG"
+            sed -i "/^# CONFIG_${opt} is not set/d"    "$CFG"
+            echo "# CONFIG_${opt} is not set"         >> "$CFG"
+            echo "[-] $opt disabled"
+          }
+
+          echo "=== Updating ksu.config ==="
+
+          # SusFS features
+          enable_opt "KSU_SUSFS"
+          enable_opt "KSU_SUSFS_SUS_PATH"
+          enable_opt "KSU_SUSFS_SUS_MOUNT"
+          enable_opt "KSU_SUSFS_SUS_KSTAT"
+          enable_opt "KSU_SUSFS_SUS_OVERLAYFS"
+          enable_opt "KSU_SUSFS_TRY_UMOUNT"
+          enable_opt "KSU_SUSFS_SPOOFER"
+          enable_opt "KSU_SUSFS_OPEN_REDIRECT"
+          enable_opt "KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT"
+          enable_opt "KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT"
+
+          # Manual Hooks — disable KPROBES
+          disable_opt "KSU_KPROBES_HOOK"
+          disable_opt "KPROBES"
+
+          echo ""
+          echo "=== Final ksu.config ==="
+          cat "$CFG"
+
+      # ── 8. عرض ملخص التغييرات ────────────────────────────────────────────────
+      - name: Show git diff summary
+        run: |
+          cd kernel
+          echo "=== Files changed ==="
+          git status --short
+          echo ""
+          echo "=== Submodule diff ==="
+          git diff --submodule=short
+          echo ""
+          echo "=== fs/Makefile tail ==="
+          tail -5 fs/Makefile
+          echo ""
+          echo "=== ksu.config ==="
+          cat arch/arm64/configs/ksu.config
+
+      # ── 9. Commit + Push (واحدة فقط) ─────────────────────────────────────────
+      - name: Commit and push to ${{ env.KERNEL_REPO }}/${{ env.KERNEL_BRANCH }}
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          cd kernel
+
+          # Stage everything
+          git add -A
+
+          # تأكد في تغييرات
+          if git diff --cached --quiet; then
+            echo "[=] Nothing to commit — kernel already up to date."
+            exit 0
+          fi
+
+          KSU_TAG="${{ github.event.inputs.ksu_tag }}"
+          SUSFS_BR="${{ github.event.inputs.susfs_branch }}"
+
+          git commit -m "kernel: inject KernelSU-Next ${KSU_TAG} + SusFS (${SUSFS_BR})
+
+Changes in this commit:
+- KernelSU-Next submodule → ${KSU_TAG} (legacy branch, SusFS-ready)
+- fs/susfs.c     : SusFS core implementation
+- include/linux/susfs.h : SusFS header
+- fs/Makefile    : obj-\$(CONFIG_KSU_SUSFS) += susfs.o
+- fs/Kconfig     : KSU_SUSFS config option
+- ksu.config     : CONFIG_KSU_SUSFS=y + all feature flags
+- ksu.config     : KPROBES disabled (Manual Hooks active)"
+
+          git push \
+            "https://${{ secrets.GH_PAT }}@github.com/${{ env.KERNEL_REPO }}.git" \
+            HEAD:"${{ env.KERNEL_BRANCH }}"
+
+          echo ""
+          echo "✅ Pushed to ${{ env.KERNEL_REPO }}/${{ env.KERNEL_BRANCH }}"
+
+      - name: Dry run summary
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        run: |
+          echo "🔍 Dry run — no push performed."
+          echo "Run again with dry_run=false to actually push."
