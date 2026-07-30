@@ -5,12 +5,13 @@
 #  ما يعمله:
 #    1. تحديث submodule KernelSU-Next → v3.1.0-legacy-susfs
 #    2. تطبيق 50_add_susfs_in_kernel-4.14.patch  (21 ملف موجود)
-#    3. نسخ الملفات الجديدة: susfs.c, sus_su.c, susfs.h, susfs_def.h, sus_su.h
-#    4. تطبيق KSU-side patch: 10_enable_susfs_for_ksu.patch
-#    5. تحديث fs/Kconfig
-#    6. تحديث ksu.config (كل الـ flags + Manual Hooks)
-#    7. إضافة vbmeta للـ DTS (exynos9820 + 9825) لمنع bootloop
-#    8. كوميت واحدة ودفع
+#    3. Manual hook: sys_reboot في kernel/reboot.c
+#    4. نسخ الملفات الجديدة: susfs.c, sus_su.c, susfs.h, susfs_def.h, sus_su.h
+#    5. تطبيق KSU-side patch: 10_enable_susfs_for_ksu.patch
+#    6. تحديث fs/Kconfig
+#    7. تحديث ksu.config (كل الـ flags + Manual Hooks)
+#    8. إضافة vbmeta للـ DTS (exynos9820 + 9825) لمنع bootloop
+#    9. كوميت واحدة ودفع
 #
 #  الاستخدام:
 #    ./inject_susfs.sh <KERNEL_DIR> <SUSFS_DIR> [REPO] [BRANCH] [DRY_RUN]
@@ -48,7 +49,7 @@ info "KSU tag : $KSU_TAG"
 info "Dry run : $DRY_RUN"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "1/7 — Update KernelSU-Next submodule → $KSU_TAG"
+step "1/8 — Update KernelSU-Next submodule → $KSU_TAG"
 # ─────────────────────────────────────────────────────────────────────────────
 cd "$KERNEL_DIR/KernelSU-Next"
 git fetch --tags origin
@@ -57,7 +58,7 @@ ok "KSU-Next @ $(git describe --tags --always) — $(git log --oneline -1)"
 cd "$KERNEL_DIR"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "2/7 — Apply 50_add_susfs_in_kernel-4.14.patch  (21 files)"
+step "2/8 — Apply 50_add_susfs_in_kernel-4.14.patch  (21 files)"
 # ─────────────────────────────────────────────────────────────────────────────
 KERNEL_PATCH=""
 for c in \
@@ -83,7 +84,54 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "3/7 — Copy new kernel files (susfs.c, sus_su.c, susfs.h, susfs_def.h, sus_su.h)"
+# ─────────────────────────────────────────────────────────────────────────────
+    step "3/8 — Manual hook: sys_reboot → kernel/reboot.c"
+    # ─────────────────────────────────────────────────────────────────────────────
+    # ksu_handle_sys_reboot is the supercall gateway used by ksud + SusFS.
+    # Required for v3.1.0-legacy-susfs Manual Hooks (KPROBES disabled).
+    # Hook goes BEFORE capability/LINUX_REBOOT_MAGIC checks — KSU uses its own
+    # KSU_INSTALL_MAGIC1 which would otherwise be rejected as -EINVAL.
+    REBOOT_C="$KERNEL_DIR/kernel/reboot.c"
+    if [ ! -f "$REBOOT_C" ]; then
+      warn "kernel/reboot.c not found — skipping sys_reboot hook"
+    elif grep -q 'ksu_handle_sys_reboot' "$REBOOT_C"; then
+      ok "kernel/reboot.c already has ksu_handle_sys_reboot — skipping"
+    else
+      python3 - "$REBOOT_C" << 'PYEOF'
+    import sys, re
+
+    path = sys.argv[1]
+    src = open(path).read()
+
+    hook_block = (
+      "\n#ifdef CONFIG_KSU\n"
+      "\textern int ksu_handle_sys_reboot(int magic1, int magic2,"
+      " unsigned int cmd, void __user **arg);\n"
+      "\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n"
+      "#endif\n"
+    )
+
+    # SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+    #                 void __user *, arg)
+    # {                           <-- insert hook right after the opening brace
+    pattern = re.compile(
+      r'(SYSCALL_DEFINE4\s*\(\s*reboot\b[^)]*\)\s*\n\{)',
+      re.MULTILINE
+    )
+    m = pattern.search(src)
+    if m:
+      insert_pos = m.end()
+      new_src = src[:insert_pos] + hook_block + src[insert_pos:]
+      open(path, 'w').write(new_src)
+      print("OK: ksu_handle_sys_reboot inserted into kernel/reboot.c")
+    else:
+      print("ERROR: SYSCALL_DEFINE4(reboot) pattern not matched in " + path)
+      sys.exit(1)
+    PYEOF
+      ok "sys_reboot hook injected into kernel/reboot.c"
+    fi
+
+    step "4/8 — Copy new kernel files (susfs.c, sus_su.c, susfs.h, susfs_def.h, sus_su.h)"
 # ─────────────────────────────────────────────────────────────────────────────
 
 copy_file() {
@@ -107,7 +155,7 @@ copy_file "susfs_def.h" "$SUSFS_DIR/kernel_patches/include/linux/susfs_def.h" "$
 copy_file "sus_su.h"    "$SUSFS_DIR/kernel_patches/include/linux/sus_su.h"    "$KERNEL_DIR/include/linux/sus_su.h"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "4/7 — Apply KSU-side patch (10_enable_susfs_for_ksu.patch)"
+step "5/8 — Apply KSU-side patch (10_enable_susfs_for_ksu.patch)"
 # ─────────────────────────────────────────────────────────────────────────────
 KSU_PATCH=""
 for c in \
@@ -133,7 +181,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "5/7 — Wire SusFS into fs/Kconfig"
+step "6/8 — Wire SusFS into fs/Kconfig"
 # ─────────────────────────────────────────────────────────────────────────────
 FS_KCONFIG="$KERNEL_DIR/fs/Kconfig"
 
@@ -222,7 +270,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "6/7 — Update ksu.config"
+step "7/8 — Update ksu.config"
 # ─────────────────────────────────────────────────────────────────────────────
 CFG="$KERNEL_DIR/arch/arm64/configs/ksu.config"
 [ -f "$CFG" ] || err "ksu.config not found at $CFG"
@@ -260,7 +308,7 @@ disable_opt KPROBES
 ok "ksu.config updated"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "7/7 — vbmeta DTS fix (exynos9820 + exynos9825) — prevents bootloop"
+step "8/8 — vbmeta DTS fix (exynos9820 + exynos9825) — prevents bootloop"
 # ─────────────────────────────────────────────────────────────────────────────
 # Adds vbmeta node with status=disabled inside android {} firmware block.
 # Required on Samsung Exynos devices to avoid AVB verification bootloop.
