@@ -1,6 +1,7 @@
 name: Inject SusFS v2.1.0 into Ocin4everKernel
 
 on:
+  push: 
   workflow_dispatch:
     inputs:
       ksu_tag:
@@ -41,24 +42,22 @@ jobs:
 
       - name: Fetch SusFS v2.1.0 directly from Commit
         run: |
-          # إنشاء مستودع فارغ وسحب الكوميت المطلوب تحديداً
-          mkdir susfs_source && cd susfs_source
-          git init
-          git remote add origin https://github.com/raystef66/kernel_xiaomi_cepheus.git
+          # سحب المستودع بدون عمل checkout للملفات أولاً لتوفير الوقت والبيانات
+          git clone --no-checkout https://github.com/raystef66/kernel_xiaomi_cepheus.git susfs_source
+          cd susfs_source
           
-          # سحب الكوميت 1f377f2 (أو 118f46f) مباشرة
-          git fetch --depth 1 origin 1f377f287413c63fa54e580459db4b868212ddbc || git fetch origin 1f377f2
-          git checkout FETCH_HEAD
+          # الانتقال المباشر للكوميت المطلوب
+          git checkout 1f377f287413c63fa54e580459db4b868212ddbc || git checkout 118f46f
           cd ..
 
-          # تجهيز مجلد susfs4ksu ليطابق المتطلبات
+          # تجهيز مجلد susfs4ksu ليطابق المسارات المتوقعة
           mkdir -p susfs4ksu/kernel_patches/fs susfs4ksu/kernel_patches/include/linux
 
           # نسخ ملفات SusFS v2.1.0 الأساسية من الكوميت
           cp susfs_source/fs/susfs.c susfs4ksu/kernel_patches/fs/
           cp susfs_source/include/linux/susfs*.h susfs4ksu/kernel_patches/include/linux/
 
-          # البحث عن ملف الباتش للفرع 4.14 ونسخه
+          # البحث عن ملف الباتش لفرع 4.14 ونسخه
           find susfs_source/ -name "*4.14*.patch" -exec cp {} susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch \; || true
 
       - name: Run Inject Script
