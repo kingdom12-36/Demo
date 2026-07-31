@@ -7,10 +7,6 @@ on:
         description: "KernelSU-Next tag"
         default: "v3.1.0-legacy-susfs"
         required: false
-      susfs_branch:
-        description: "SusFS Repo Branch"
-        default: "fifteen"
-        required: false
       dry_run:
         description: "Dry run (show changes, no push)"
         default: "false"
@@ -43,23 +39,26 @@ jobs:
             "https://${{ secrets.GH_PAT }}@github.com/${{ env.KERNEL_REPO }}.git" \
             kernel
 
-      - name: Fetch SusFS v2.1.0 Sources & Patches
+      - name: Fetch SusFS v2.1.0 directly from Commit
         run: |
-          # سحب مصدر raystef66 الذي يحتوي على SusFS v2.1.0
-          git clone \
-            --depth=1 \
-            --branch "${{ github.event.inputs.susfs_branch }}" \
-            "https://github.com/raystef66/kernel_xiaomi_cepheus.git" \
-            susfs_source
+          # إنشاء مستودع فارغ وسحب الكوميت المطلوب تحديداً
+          mkdir susfs_source && cd susfs_source
+          git init
+          git remote add origin https://github.com/raystef66/kernel_xiaomi_cepheus.git
+          
+          # سحب الكوميت 1f377f2 (أو 118f46f) مباشرة
+          git fetch --depth 1 origin 1f377f287413c63fa54e580459db4b868212ddbc || git fetch origin 1f377f2
+          git checkout FETCH_HEAD
+          cd ..
 
-          # تجهيز المجلد الموحد ليطابق المسارات التي يتوقعها inject_susfs_v2.sh
+          # تجهيز مجلد susfs4ksu ليطابق المتطلبات
           mkdir -p susfs4ksu/kernel_patches/fs susfs4ksu/kernel_patches/include/linux
 
-          # نسخ ملفات SusFS v2.1.0 الأساسية
+          # نسخ ملفات SusFS v2.1.0 الأساسية من الكوميت
           cp susfs_source/fs/susfs.c susfs4ksu/kernel_patches/fs/
           cp susfs_source/include/linux/susfs*.h susfs4ksu/kernel_patches/include/linux/
 
-          # البحث عن رقعة Kernel 4.14 ووضعها في مكانها
+          # البحث عن ملف الباتش للفرع 4.14 ونسخه
           find susfs_source/ -name "*4.14*.patch" -exec cp {} susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch \; || true
 
       - name: Run Inject Script
