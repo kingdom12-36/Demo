@@ -1,4 +1,4 @@
-name: Inject SusFS into Ocin4everKernel
+name: Inject SusFS v2.1.0 into Ocin4everKernel
 
 on:
   workflow_dispatch:
@@ -8,8 +8,8 @@ on:
         default: "v3.1.0-legacy-susfs"
         required: false
       susfs_branch:
-        description: "SusFS GitLab branch"
-        default: "kernel-4.14"
+        description: "SusFS Repo Branch"
+        default: "fifteen"
         required: false
       dry_run:
         description: "Dry run (show changes, no push)"
@@ -25,15 +25,15 @@ env:
 
 jobs:
   inject:
-    name: "Inject SusFS"
+    name: "Inject SusFS v2.1.0"
     runs-on: ubuntu-22.04
     timeout-minutes: 20
 
     steps:
-      - name: Checkout this repo (scripts)
+      - name: Checkout Workflow Repository
         uses: actions/checkout@v4
 
-      - name: Clone kernel repo
+      - name: Clone Target Kernel Repository
         run: |
           git config --global user.name  "SusFS Bot"
           git config --global user.email "susfs-bot@noreply"
@@ -43,21 +43,32 @@ jobs:
             "https://${{ secrets.GH_PAT }}@github.com/${{ env.KERNEL_REPO }}.git" \
             kernel
 
-      - name: Clone SusFS from GitLab
+      - name: Fetch SusFS v2.1.0 Sources & Patches
         run: |
+          # سحب مصدر raystef66 الذي يحتوي على SusFS v2.1.0
           git clone \
             --depth=1 \
             --branch "${{ github.event.inputs.susfs_branch }}" \
-            "https://gitlab.com/simonpunk/susfs4ksu.git" \
-            susfs4ksu
+            "https://github.com/raystef66/kernel_xiaomi_cepheus.git" \
+            susfs_source
 
-      - name: Run inject script
+          # تجهيز المجلد الموحد ليطابق المسارات التي يتوقعها inject_susfs_v2.sh
+          mkdir -p susfs4ksu/kernel_patches/fs susfs4ksu/kernel_patches/include/linux
+
+          # نسخ ملفات SusFS v2.1.0 الأساسية
+          cp susfs_source/fs/susfs.c susfs4ksu/kernel_patches/fs/
+          cp susfs_source/include/linux/susfs*.h susfs4ksu/kernel_patches/include/linux/
+
+          # البحث عن رقعة Kernel 4.14 ووضعها في مكانها
+          find susfs_source/ -name "*4.14*.patch" -exec cp {} susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch \; || true
+
+      - name: Run Inject Script
         env:
           KSU_TAG: ${{ github.event.inputs.ksu_tag }}
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          chmod +x inject_susfs.sh
-          ./inject_susfs.sh \
+          chmod +x inject_susfs_v2.sh
+          ./inject_susfs_v2.sh \
             "$(pwd)/kernel" \
             "$(pwd)/susfs4ksu" \
             "${{ env.KERNEL_REPO }}" \
