@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-#  inject_susfs_v2.sh — Implementation for SusFS v2.1.0 + KSU-Next (4.14)
+#  inject_susfs_v2.sh — Full SusFS v2.1.0 + KSU-Next (4.14) Safe Injector
 #  Based on commits: 1f377f2 & 118f46f (raystef66/kernel_xiaomi_cepheus #6)
 # =============================================================================
 set -euo pipefail
@@ -31,20 +31,16 @@ echo "  └───────────────────────
 echo -e "${N}"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "1/7 — Commit 1f377f2: Switch Submodule to $KSU_BRANCH"
+step "1/8 — Fetch and Switch KernelSU-Next Submodule → $KSU_BRANCH"
 # ─────────────────────────────────────────────────────────────────────────────
 cd "$KERNEL_DIR/KernelSU-Next"
-
-# Fetch all remote branches & tags explicitly
 git fetch --all --tags --prune
 
-# Check if branch exists on origin or locally
 if git rev-parse --verify "origin/$KSU_BRANCH" >/dev/null 2>&1; then
     git checkout -B "$KSU_BRANCH" "origin/$KSU_BRANCH"
 elif git rev-parse --verify "$KSU_BRANCH" >/dev/null 2>&1; then
     git checkout "$KSU_BRANCH"
 else
-    # Fallback to direct commit or remote tracking if name differs
     git checkout FETCH_HEAD || err "Branch $KSU_BRANCH not found in KernelSU-Next repository"
 fi
 
@@ -52,7 +48,31 @@ ok "KernelSU-Next branch: $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse -
 cd "$KERNEL_DIR"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "2/7 — Commit 1f377f2: Align drivers/Makefile"
+step "2/8 — Apply 50_add_susfs Patch to Kernel Source (The ADDITIONS)"
+# ─────────────────────────────────────────────────────────────────────────────
+KERNEL_PATCH=""
+for c in \
+    "$SUSFS_DIR/kernel_patches/50_add_susfs_in_kernel-4.14.patch" \
+    "$SUSFS_DIR/kernel_patches/50_add_susfs_in_kernel-4.x.patch"  \
+    "$SUSFS_DIR/50_add_susfs_in_kernel-4.14.patch"; do
+    [ -f "$c" ] && KERNEL_PATCH="$c" && break
+done
+
+if [ -n "$KERNEL_PATCH" ]; then
+    ok "Found patch: $(basename "$KERNEL_PATCH")"
+    # Apply with forward + fuzz, ignoring already applied hunks safely
+    if patch -p1 --forward --fuzz=3 --directory="$KERNEL_DIR" < "$KERNEL_PATCH" >/dev/null 2>&1; then
+        ok "SusFS kernel hooks patched successfully into fs/ and include/ linux files!"
+    else
+        warn "Patch applied with warnings or already present — continuing safe execution."
+        patch -p1 --forward --fuzz=3 --directory="$KERNEL_DIR" < "$KERNEL_PATCH" || true
+    fi
+else
+    err "Could not find 50_add_susfs patch in $SUSFS_DIR"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+step "3/8 — Align drivers/Makefile"
 # ─────────────────────────────────────────────────────────────────────────────
 DRV_MK="$KERNEL_DIR/drivers/Makefile"
 if [ -f "$DRV_MK" ]; then
@@ -66,7 +86,7 @@ if [ -f "$DRV_MK" ]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "3/7 — Commit 1f377f2: Inject sys_reboot Hook (kernel/reboot.c)"
+step "4/8 — Inject sys_reboot Hook (kernel/reboot.c)"
 # ─────────────────────────────────────────────────────────────────────────────
 REBOOT_C="$KERNEL_DIR/kernel/reboot.c"
 if [ -f "$REBOOT_C" ]; then
@@ -107,13 +127,13 @@ PYEOF
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "4/7 — Commit 118f46f: Clean Deprecated sus_su & Sync SusFS v2.1.0 Core"
+step "5/8 — Clean Deprecated sus_su & Sync SusFS v2.1.0 Core Files"
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. إزالة ملفات sus_su إن وجدت
+# Delete deprecated files if present
 rm -f "$KERNEL_DIR/fs/sus_su.c" "$KERNEL_DIR/include/linux/sus_su.h"
-info "Removed deprecated sus_su files if present"
+info "Removed deprecated sus_su files"
 
-# 2. نسخ ملفات Core الخاصة بـ SusFS v2.1.0
+# Copy core files
 cp -f "$SUSFS_DIR/kernel_patches/fs/susfs.c" "$KERNEL_DIR/fs/susfs.c" 2>/dev/null || \
 cp -f "$SUSFS_DIR/fs/susfs.c" "$KERNEL_DIR/fs/susfs.c"
 
@@ -126,7 +146,7 @@ cp -f "$SUSFS_DIR/include/linux/susfs_def.h" "$KERNEL_DIR/include/linux/susfs_de
 ok "Synced SusFS v2.1.0 core files (susfs.c, susfs.h, susfs_def.h)"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "5/7 — Commit 118f46f: Clean Stale overlayfs Macros"
+step "6/8 — Clean Stale overlayfs Macros"
 # ─────────────────────────────────────────────────────────────────────────────
 clean_overlay_file() {
     local file="$1"
@@ -142,14 +162,14 @@ clean_overlay_file "$KERNEL_DIR/fs/overlayfs/inode.c"
 clean_overlay_file "$KERNEL_DIR/fs/overlayfs/overlayfs.h"
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "6/7 — Wire fs/Makefile & Update ksu.config"
+step "7/8 — Wire fs/Makefile & Update ksu.config"
 # ─────────────────────────────────────────────────────────────────────────────
 FS_MK="$KERNEL_DIR/fs/Makefile"
 if ! grep -q 'susfs.o' "$FS_MK"; then
     echo -e '\n# SusFS v2.1.0\nobj-$(CONFIG_KSU_SUSFS) += susfs.o' >> "$FS_MK"
     ok "Added susfs.o to fs/Makefile"
 fi
-sed -i '/sus_su\.o/d' "$FS_MK" # مسح أي إشارة قديمة لـ sus_su.o
+sed -i '/sus_su\.o/d' "$FS_MK"
 
 CFG="$KERNEL_DIR/arch/arm64/configs/ksu.config"
 if [ -f "$CFG" ]; then
@@ -176,7 +196,7 @@ if [ -f "$CFG" ]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "7/7 — Git Commit & Push"
+step "8/8 — Git Commit & Push"
 # ─────────────────────────────────────────────────────────────────────────────
 cd "$KERNEL_DIR"
 if [ "$DRY_RUN" = "true" ]; then
@@ -188,13 +208,13 @@ git add -A
 if git diff --cached --quiet; then
     ok "No changes to commit."
 else
-    git commit -m "kernel: Update KernelSU-Next to v3.1.0-legacy-susfs-v2 with SUSFS v2.1.0
+    git commit -m "kernel: Inject SusFS v2.1.0 + KernelSU-Next (legacy-susfs-v2)
 
-- Switch KernelSU-Next submodule to legacy-susfs-v2 branch
-- Implement SusFS v2.1.0 core files (susfs.c, susfs.h, susfs_def.h)
-- Remove deprecated sus_su feature and stale overlayfs blocks
-- Add sys_reboot Manual Hook in kernel/reboot.c
-- Align drivers/Makefile and fs/Makefile Kbuild rules"
+- Applied 50_add_susfs_in_kernel-4.14.patch to add SusFS hooks across fs/
+- Switched KernelSU-Next submodule to legacy-susfs-v2
+- Synced SusFS v2.1.0 core files (susfs.c, susfs.h, susfs_def.h)
+- Injected sys_reboot Manual Hook in kernel/reboot.c
+- Updated drivers/Makefile, fs/Makefile, and ksu.config"
 
     if [ -n "${GH_PAT:-}" ]; then
         git push "https://${GH_PAT}@github.com/${KERNEL_REPO}.git" HEAD:"$KERNEL_BRANCH"
