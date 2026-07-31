@@ -34,9 +34,20 @@ echo -e "${N}"
 step "1/7 — Commit 1f377f2: Switch Submodule to $KSU_BRANCH"
 # ─────────────────────────────────────────────────────────────────────────────
 cd "$KERNEL_DIR/KernelSU-Next"
-git fetch origin
-git checkout "$KSU_BRANCH" || git checkout -b "$KSU_BRANCH" "origin/$KSU_BRANCH"
-git pull origin "$KSU_BRANCH" || true
+
+# Fetch all remote branches & tags explicitly
+git fetch --all --tags --prune
+
+# Check if branch exists on origin or locally
+if git rev-parse --verify "origin/$KSU_BRANCH" >/dev/null 2>&1; then
+    git checkout -B "$KSU_BRANCH" "origin/$KSU_BRANCH"
+elif git rev-parse --verify "$KSU_BRANCH" >/dev/null 2>&1; then
+    git checkout "$KSU_BRANCH"
+else
+    # Fallback to direct commit or remote tracking if name differs
+    git checkout FETCH_HEAD || err "Branch $KSU_BRANCH not found in KernelSU-Next repository"
+fi
+
 ok "KernelSU-Next branch: $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
 cd "$KERNEL_DIR"
 
