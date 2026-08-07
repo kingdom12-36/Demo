@@ -129,21 +129,36 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 step "5/8 — Clean Deprecated sus_su & Sync SusFS v2.1.0 Core Files"
 # ─────────────────────────────────────────────────────────────────────────────
-# Delete deprecated files if present
 rm -f "$KERNEL_DIR/fs/sus_su.c" "$KERNEL_DIR/include/linux/sus_su.h"
 info "Removed deprecated sus_su files"
 
-# Copy core files
-cp -f "$SUSFS_DIR/kernel_patches/fs/susfs.c" "$KERNEL_DIR/fs/susfs.c" 2>/dev/null || \
-cp -f "$SUSFS_DIR/fs/susfs.c" "$KERNEL_DIR/fs/susfs.c"
+sync_file() {
+    local filename="$1"
+    local target_dir="$2"
+    local src_file=""
 
-cp -f "$SUSFS_DIR/kernel_patches/include/linux/susfs.h" "$KERNEL_DIR/include/linux/susfs.h" 2>/dev/null || \
-cp -f "$SUSFS_DIR/include/linux/susfs.h" "$KERNEL_DIR/include/linux/susfs.h"
+    for path in \
+        "$SUSFS_DIR/kernel_patches/fs/$filename" \
+        "$SUSFS_DIR/fs/$filename" \
+        "$SUSFS_DIR/kernel_patches/include/linux/$filename" \
+        "$SUSFS_DIR/include/linux/$filename"; do
+        if [ -f "$path" ]; then
+            src_file="$path"
+            break
+        fi
+    done
 
-cp -f "$SUSFS_DIR/kernel_patches/include/linux/susfs_def.h" "$KERNEL_DIR/include/linux/susfs_def.h" 2>/dev/null || \
-cp -f "$SUSFS_DIR/include/linux/susfs_def.h" "$KERNEL_DIR/include/linux/susfs_def.h"
+    if [ -n "$src_file" ]; then
+        cp -f "$src_file" "$target_dir/$filename"
+        ok "Synced $filename"
+    else
+        warn "Optional file $filename not found in $SUSFS_DIR (skipping)"
+    fi
+}
 
-ok "Synced SusFS v2.1.0 core files (susfs.c, susfs.h, susfs_def.h)"
+sync_file "susfs.c" "$KERNEL_DIR/fs"
+sync_file "susfs.h" "$KERNEL_DIR/include/linux"
+sync_file "susfs_def.h" "$KERNEL_DIR/include/linux"
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "6/8 — Clean Stale overlayfs Macros"
