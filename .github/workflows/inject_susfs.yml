@@ -40,50 +40,12 @@ jobs:
             "https://${{ secrets.GH_PAT }}@github.com/${{ env.KERNEL_REPO }}.git" \
             kernel
 
-      - name: Fetch SusFS v2.1.0 directly from Commit
+      - name: Fetch Clean SusFS v2.1.0 from Official Simonpunk Repo
         run: |
           set -euo pipefail
 
-          REPO=https://github.com/raystef66/kernel_xiaomi_cepheus.git
-          COMMIT=1f377f287413c63fa54e580459db4b868212ddbc
-
-          # Initialize a repo and try to fetch the single commit first (fast).
-          git init susfs_source
-          cd susfs_source
-          git remote add origin "$REPO"
-
-          # Try to fetch the single commit (fast). If it fails, fetch full history.
-          if ! git fetch --no-tags --depth=1 origin "$COMMIT"; then
-            echo "shallow/single-commit fetch failed, fetching full history..."
-            git fetch --no-tags --prune origin
-          fi
-
-          git checkout --force "$COMMIT"
-          cd ..
-
-          # Prepare target directories
-          mkdir -p susfs4ksu/kernel_patches/fs susfs4ksu/kernel_patches/include/linux
-
-          # Copy files only if they exist; print helpful warnings otherwise
-          if [ -f susfs_source/fs/susfs.c ]; then
-            cp susfs_source/fs/susfs.c susfs4ksu/kernel_patches/fs/
-          else
-            echo "Warning: susfs.c not found in commit $COMMIT"
-          fi
-
-          if ls susfs_source/include/linux/susfs*.h 1> /dev/null 2>&1; then
-            cp susfs_source/include/linux/susfs*.h susfs4ksu/kernel_patches/include/linux/
-          else
-            echo "Warning: susfs header(s) not found in commit $COMMIT"
-          fi
-
-          # Copy 4.14 patch if found
-          FOUND_PATCH=$(find susfs_source/ -name "*4.14*.patch" -print -quit || true)
-          if [ -n "$FOUND_PATCH" ]; then
-            cp "$FOUND_PATCH" susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch
-          else
-            echo "No 4.14 patch found in repo at commit $COMMIT"
-          fi
+          # سحب المستودع الرسمي لـ simonpunk مباشرة وبشكل نظيف
+          git clone --depth=1 https://github.com/simonpunk/susfs4ksu.git susfs4ksu
 
       - name: Run Inject Script
         env:
