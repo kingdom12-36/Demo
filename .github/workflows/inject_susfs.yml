@@ -40,12 +40,10 @@ jobs:
             "https://${{ secrets.GH_PAT }}@github.com/${{ env.KERNEL_REPO }}.git" \
             kernel
 
-      - name: Fetch Clean SusFS v2.1.0 from Official Simonpunk Repo
+      - name: Fetch Clean SusFS v2.1.0 from Official Simonpunk GitLab Repo
         run: |
           set -euo pipefail
-
-          # سحب المستودع الرسمي لـ simonpunk مباشرة وبشكل نظيف
-          git clone --depth=1 https://github.com/simonpunk/susfs4ksu.git susfs4ksu
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
 
       - name: Run Inject Script
         env:
