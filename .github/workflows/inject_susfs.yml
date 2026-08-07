@@ -90,8 +90,8 @@ jobs:
           KSU_TAG: ${{ github.event.inputs.ksu_tag }}
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          chmod +x inject_susfs_v2.sh
-          ./inject_susfs_v2.sh \
+          chmod +x inject_susfs.sh
+          ./inject_susfs.sh \
             "$(pwd)/kernel" \
             "$(pwd)/susfs4ksu" \
             "${{ env.KERNEL_REPO }}" \
